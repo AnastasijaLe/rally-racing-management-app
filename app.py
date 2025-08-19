@@ -4,6 +4,7 @@ import random
 import time
 from datetime import datetime
 from urllib.parse import urlparse
+import decimal
 
 # Check if required packages are installed
 try:
@@ -46,7 +47,7 @@ def init_connection():
             st.error("Snowflake credentials not found in secrets!")
             return None
         
-        # Get account from secrets and clean it
+        # Get account from secrets and clean it 
         raw_account = st.secrets["snowflake"]["account"]
         
         # Parse the account from URL if it's a full URL
@@ -58,15 +59,15 @@ def init_connection():
         
         st.sidebar.info(f"Connecting to account: {account}")
             
-        # Connect to Snowflake
+        # Connect to Snowflake 
         conn = snowflake.connector.connect(
             user=st.secrets["snowflake"]["user"],
             password=st.secrets["snowflake"]["password"],
-            account=st.secrets["snowflake"]["account"],
-            role=st.secrets["snowflake"]["role"],
-            warehouse=st.secrets["snowflake"]["warehouse"],
-            database=st.secrets["snowflake"]["database"],
+            account=account,
+            warehouse=st.secrets["snowflake"].get("warehouse", "COMPUTE_WH"),
+            database=st.secrets["snowflake"].get("database", "BOOTCAMP_RALLY"),
             schema=st.secrets["snowflake"].get("schema", "PUBLIC"),
+            role=st.secrets["snowflake"].get("role", "SYSADMIN"),
             client_session_keep_alive=True
         )
         
@@ -88,6 +89,12 @@ def init_connection():
         st.error(f"Unexpected error: {str(e)}")
         return None
 
+# Convert decimal values to float for calculations
+def convert_decimal_to_float(value):
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    return value
+
 # Perform query with better error handling
 @st.cache_data(ttl=600)
 def run_query(query, _conn):
@@ -104,7 +111,7 @@ def execute_query(query, _conn):
     try:
         with _conn.cursor() as cur:
             cur.execute(query)
-        return True
+            return True
     except Exception as e:
         st.error(f"Query execution failed: {str(e)}")
         return False
@@ -130,7 +137,10 @@ def add_car(_conn, team_id, model, speed, horsepower, handling, durability):
     INSERT INTO bootcamp_rally.cars.cars (team_id, model, speed, horsepower, handling, durability)
     VALUES ({team_id}, '{model}', {speed}, {horsepower}, {handling}, {durability})
     """
-    return execute_query(query, _conn)
+    success = execute_query(query, _conn)
+    if success:
+        st.rerun()  # Refresh the page to show the new car
+    return success
 
 # Add new team
 def add_team(_conn, team_name, budget):
@@ -138,7 +148,10 @@ def add_team(_conn, team_name, budget):
     INSERT INTO bootcamp_rally.teams.teams (team_name, budget)
     VALUES ('{team_name}', {budget})
     """
-    return execute_query(query, _conn)
+    success = execute_query(query, _conn)
+    if success:
+        st.rerun()  # Refresh the page to show the new team
+    return success
 
 # Get team budgets
 def get_team_budgets(_conn):
@@ -171,7 +184,9 @@ def simulate_race(_conn, race_id):
     if not race_details:
         return "Race not found!"
     
-    race_name, track_length, track_type, fee, prize_pool = race_details[0]
+    # Convert decimal values to float
+    race_details = [convert_decimal_to_float(val) for val in race_details[0]]
+    race_name, track_length, track_type, fee, prize_pool = race_details
     
     # Get all cars with their teams
     cars_query = """
@@ -184,7 +199,10 @@ def simulate_race(_conn, race_id):
     # Check if teams can afford participation fee
     participants = []
     for car in all_cars:
+        # Convert decimal values to float
+        car = [convert_decimal_to_float(val) for val in car]
         car_id, team_id, team_name, model, speed, hp, handling, durability, budget = car
+        
         if budget >= fee:
             participants.append({
                 'car_id': car_id,
@@ -226,7 +244,7 @@ def simulate_race(_conn, race_id):
         random_factor = random.uniform(0.8, 1.2)
         
         # Calculate finish time (lower is better)
-        finish_time = (track_length * 1000) / (base_performance * track_factor * random_factor)
+        finish_time = (track_length * 1000) / float(base_performance * track_factor * random_factor)
         
         results.append({
             'car_id': car['car_id'],
@@ -259,7 +277,11 @@ def simulate_race(_conn, race_id):
     
     # Get the last inserted race_id
     race_id_query = "SELECT MAX(race_id) FROM bootcamp_rally.races.races"
-    new_race_id = run_query(race_id_query, _conn)[0][0]
+    new_race_id_result = run_query(race_id_query, _conn)
+    if new_race_id_result:
+        new_race_id = convert_decimal_to_float(new_race_id_result[0][0])
+    else:
+        new_race_id = 1
     
     # Insert results
     for result in results:
@@ -297,8 +319,8 @@ def main():
                     st.error("BOOTCAMP_RALLY database not found! Please run the SQL scripts first.")
                     demo_mode = True
                     teams, cars, races = get_demo_data()
-            except:
-                st.error("Cannot access BOOTCAMP_RALLY database. Running in demo mode.")
+            except Exception as e:
+                st.error(f"Cannot access BOOTCAMP_RALLY database: {e}. Running in demo mode.")
                 demo_mode = True
                 teams, cars, races = get_demo_data()
     
@@ -370,7 +392,6 @@ def main():
                     if team_name:
                         if add_team(conn, team_name, budget):
                             st.success(f"Team '{team_name}' added with budget ${budget}!")
-                            st.rerun()
                         else:
                             st.error("Failed to add team. Please check your database connection.")
                     else:
@@ -419,7 +440,6 @@ def main():
                             team_id = team_options[selected_team]
                             if add_car(conn, team_id, model, speed, horsepower, handling, durability):
                                 st.success(f"Car '{model}' added to team!")
-                                st.rerun()
                             else:
                                 st.error("Failed to add car. Please check your database connection.")
                         else:
@@ -516,7 +536,7 @@ def main():
             
             if results:
                 results_df = pd.DataFrame(results, columns=["Race", "Position", "Team", "Car Model", "Finish Time", "Prize ($)"])
-                results_df['Finish Time'] = results_df['Finish Time'].round(2)
+                results_df['Finish Time'] = results_df['Finish Time'].apply(convert_decimal_to_float).round(2)
                 st.dataframe(results_df, hide_index=True)
             else:
                 st.info("No race results available yet. Run a race first!")
